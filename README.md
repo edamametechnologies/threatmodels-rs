@@ -1,6 +1,6 @@
-# edamame_models
+# threatmodels-rs
 
-A Rust crate providing cloud-based data model management with signature-based updates, custom data support, and thread-safe access patterns.
+A Rust crate providing cloud-based data model management with signature-based updates, custom data support, and thread-safe access patterns. Used to dynamically pull updates from https://github.com/edamametechnologies/threatmodels.
 
 ## Overview
 
