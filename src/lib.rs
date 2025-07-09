@@ -1,9 +1,10 @@
-use undeadlock::CustomRwLock;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, trace};
+use undeadlock::CustomRwLock;
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
@@ -27,7 +28,7 @@ pub enum UpdateStatus {
 pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
     pub data: Arc<CustomRwLock<T>>,
     file_name: String,
-    is_custom: Arc<CustomRwLock<bool>>,
+    is_custom: Arc<AtomicBool>,
     builtin_data: Arc<T>,
 }
 
@@ -48,7 +49,7 @@ where
         Ok(Self {
             data: Arc::new(CustomRwLock::new(initial_data)),
             file_name,
-            is_custom: Arc::new(CustomRwLock::new(false)),
+            is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
         })
     }
@@ -64,7 +65,7 @@ where
         Self {
             data: Arc::new(CustomRwLock::new(initial_data)),
             file_name: "test_empty.json".to_string(),
-            is_custom: Arc::new(CustomRwLock::new(false)),
+            is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
         }
     }
@@ -72,7 +73,7 @@ where
     /// Sets custom data, replacing the current data.
     pub async fn set_custom_data(&self, data: T) {
         *self.data.write().await = data;
-        *self.is_custom.write().await = true;
+        self.is_custom.store(true, Ordering::Relaxed);
         info!(
             "Set custom data for file: '{}'. Updates will be skipped.",
             self.file_name
@@ -81,9 +82,9 @@ where
 
     /// Resets the data to the original built-in data.
     pub async fn reset_to_default(&self) {
-        if *self.is_custom.read().await {
+        if self.is_custom.load(Ordering::Relaxed) {
             *self.data.write().await = (*self.builtin_data).clone();
-            *self.is_custom.write().await = false;
+            self.is_custom.store(false, Ordering::Relaxed);
             info!(
                 "Reset data to default for file: '{}'. Updates are now enabled.",
                 self.file_name
@@ -98,14 +99,14 @@ where
 
     /// Checks if the model is currently using custom data.
     pub async fn is_custom(&self) -> bool {
-        *self.is_custom.read().await
+        self.is_custom.load(Ordering::Relaxed)
     }
 
     /// Overwrites the current data with test data (useful for testing).
     /// This marks the data as custom.
     pub async fn overwrite_with_test_data(&self, data: T) {
         *self.data.write().await = data;
-        *self.is_custom.write().await = true;
+        self.is_custom.store(true, Ordering::Relaxed);
         info!(
             "Overwrote with test data for file: '{}'. Marked as custom.",
             self.file_name
@@ -138,7 +139,7 @@ where
     /// Determines if an update is needed by comparing the current signature with the remote one.
     /// Returns `Ok(false)` if the model is using custom data.
     pub async fn needs_update(&self, branch: &str) -> Result<bool> {
-        if *self.is_custom.read().await {
+        if self.is_custom.load(Ordering::Relaxed) {
             trace!(
                 "Skipping needs_update check for '{}' because custom data is active.",
                 self.file_name
@@ -189,7 +190,7 @@ where
     where
         F: Fn(&str) -> Result<T>,
     {
-        if *self.is_custom.read().await && !force {
+        if self.is_custom.load(Ordering::Relaxed) && !force {
             info!(
                 "Skipping update for file: '{}' on branch: '{}' because custom data is active and force=false.",
                 self.file_name, branch
@@ -197,7 +198,7 @@ where
             return Ok(UpdateStatus::SkippedCustom);
         }
 
-        if *self.is_custom.read().await && force {
+        if self.is_custom.load(Ordering::Relaxed) && force {
             info!(
                 "Forcing update for file: '{}'. Resetting to default first.",
                 self.file_name
