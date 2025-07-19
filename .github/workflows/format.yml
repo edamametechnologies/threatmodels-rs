@@ -1,0 +1,35 @@
+on:
+  push:
+    branches: [ dev, main ]
+  pull_request:
+
+# Auto cancel previous runs if they were not completed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+name: Rust format
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - run: rustup component add rustfmt
+
+      - name: Check code format
+        run: |
+          cargo fmt --all -- --check
+
+      - name: Install cargo-hack
+        run: |
+          cargo install -f cargo-hack
+    
+      - name: Check all features
+        run: |
+          cargo hack check --all-features --all-targets
