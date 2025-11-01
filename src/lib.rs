@@ -30,6 +30,7 @@ pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
     file_name: String,
     is_custom: Arc<AtomicBool>,
     builtin_data: Arc<T>,
+    update_in_progress: Arc<AtomicBool>,
 }
 
 impl<T> CloudModel<T>
@@ -51,6 +52,7 @@ where
             file_name,
             is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -67,6 +69,7 @@ where
             file_name: "test_empty.json".to_string(),
             is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
+            update_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -198,6 +201,28 @@ where
             return Ok(UpdateStatus::SkippedCustom);
         }
 
+        if self
+            .update_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            info!(
+                "Skipping update for file: '{}' because another update is already in progress.",
+                self.file_name
+            );
+            return Ok(UpdateStatus::NotUpdated);
+        }
+        let result = self.perform_update(branch, force, parser).await;
+
+        self.update_in_progress.store(false, Ordering::Release);
+
+        result
+    }
+
+    async fn perform_update<F>(&self, branch: &str, force: bool, parser: F) -> Result<UpdateStatus>
+    where
+        F: Fn(&str) -> Result<T>,
+    {
         if self.is_custom.load(Ordering::Relaxed) && force {
             info!(
                 "Forcing update for file: '{}'. Resetting to default first.",
