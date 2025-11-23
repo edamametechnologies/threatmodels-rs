@@ -1,6 +1,6 @@
 [package]
 name = "edamame_models"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
 license = "Apache-2.0"
@@ -18,6 +18,7 @@ tokio = { version = "1.39.2", features = ["full", "tracing"] }
 reqwest = { version = "0.12.5", default-features = false, features = ["gzip", "rustls-tls"] }
 anyhow = "1.0.86"
 serial_test = "3.1.1"
+chrono = "0.4"
 
 [lib]
 name = "edamame_models"

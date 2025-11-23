@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context, Result};
+use chrono::NaiveDate;
 use reqwest::Client;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 use undeadlock::CustomRwLock;
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
@@ -14,6 +15,12 @@ pub trait CloudSignature {
     fn set_signature(&mut self, signature: String);
 }
 
+/// Optional trait for models that have a date field for validation.
+/// If implemented, CloudModel will automatically reject downloads that are older than the built-in data.
+pub trait CloudDate {
+    fn get_date(&self) -> Option<&str>;
+}
+
 /// Represents the status of an update operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UpdateStatus {
@@ -21,6 +28,17 @@ pub enum UpdateStatus {
     NotUpdated,
     FormatError,
     SkippedCustom,
+}
+
+/// Outcome of applying custom validation logic during an update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateValidation {
+    /// Accept the downloaded model and persist it.
+    Accept,
+    /// Reject the downloaded model and revert to the built-in data set.
+    RejectUseBuiltin,
+    /// Reject the downloaded model but keep the currently loaded data.
+    RejectKeepCurrent,
 }
 
 /// A generic model for handling cloud-based data fetching and updating.
@@ -193,6 +211,23 @@ where
     where
         F: Fn(&str) -> Result<T>,
     {
+        self.update_with_validation(branch, force, parser, |_, _| Ok(UpdateValidation::Accept))
+            .await
+    }
+
+    /// Same as [`CloudModel::update`] but accepts an additional validator that can reject
+    /// downloaded data based on arbitrary business rules (e.g. rejecting stale models).
+    pub async fn update_with_validation<F, V>(
+        &self,
+        branch: &str,
+        force: bool,
+        parser: F,
+        validator: V,
+    ) -> Result<UpdateStatus>
+    where
+        F: Fn(&str) -> Result<T>,
+        V: Fn(&T, &T) -> Result<UpdateValidation>,
+    {
         if self.is_custom.load(Ordering::Relaxed) && !force {
             info!(
                 "Skipping update for file: '{}' on branch: '{}' because custom data is active and force=false.",
@@ -212,16 +247,23 @@ where
             );
             return Ok(UpdateStatus::NotUpdated);
         }
-        let result = self.perform_update(branch, force, parser).await;
+        let result = self.perform_update(branch, force, parser, validator).await;
 
         self.update_in_progress.store(false, Ordering::Release);
 
         result
     }
 
-    async fn perform_update<F>(&self, branch: &str, force: bool, parser: F) -> Result<UpdateStatus>
+    async fn perform_update<F, V>(
+        &self,
+        branch: &str,
+        force: bool,
+        parser: F,
+        validator: V,
+    ) -> Result<UpdateStatus>
     where
         F: Fn(&str) -> Result<T>,
+        V: Fn(&T, &T) -> Result<UpdateValidation>,
     {
         if self.is_custom.load(Ordering::Relaxed) && force {
             info!(
@@ -306,14 +348,36 @@ where
 
         match parser(&json_text) {
             Ok(mut new_data) => {
-                new_data.set_signature(new_signature);
-                // Only hold the write lock for the minimum time needed to update the data
-                {
-                    let mut data = self.data.write().await;
-                    *data = new_data;
+                // Run custom validator first
+                let validation_result = validator(self.builtin_data.as_ref(), &new_data)?;
+
+                match validation_result {
+                    UpdateValidation::Accept => {
+                        new_data.set_signature(new_signature);
+                        {
+                            let mut data = self.data.write().await;
+                            *data = new_data;
+                        }
+                        info!("Successfully updated file: '{}'", self.file_name);
+                        Ok(UpdateStatus::Updated)
+                    }
+                    UpdateValidation::RejectUseBuiltin => {
+                        warn!(
+                            "Validator rejected downloaded data for '{}'. Restoring built-in data.",
+                            self.file_name
+                        );
+                        let mut data = self.data.write().await;
+                        *data = (*self.builtin_data).clone();
+                        Ok(UpdateStatus::NotUpdated)
+                    }
+                    UpdateValidation::RejectKeepCurrent => {
+                        warn!(
+                            "Validator rejected downloaded data for '{}'. Keeping current data.",
+                            self.file_name
+                        );
+                        Ok(UpdateStatus::NotUpdated)
+                    }
                 }
-                info!("Successfully updated file: '{}'", self.file_name);
-                Ok(UpdateStatus::Updated)
             }
             Err(err) => {
                 error!(
@@ -324,6 +388,111 @@ where
             }
         }
     }
+}
+
+// Specialized implementation for types that implement CloudDate
+impl<T> CloudModel<T>
+where
+    T: CloudSignature + CloudDate + Send + Sync + Clone + 'static,
+{
+    /// Updates with automatic date validation for models implementing CloudDate.
+    /// Rejects downloads older than the built-in data.
+    pub async fn update_with_date_check<F>(
+        &self,
+        branch: &str,
+        force: bool,
+        parser: F,
+    ) -> Result<UpdateStatus>
+    where
+        F: Fn(&str) -> Result<T>,
+    {
+        self.update_with_validation(branch, force, parser, |builtin, downloaded| {
+            validate_model_dates(builtin, downloaded)
+        })
+        .await
+    }
+}
+
+/// Validates dates for models implementing CloudDate
+fn validate_model_dates<T>(builtin: &T, downloaded: &T) -> Result<UpdateValidation>
+where
+    T: CloudDate,
+{
+    let builtin_date_str = match builtin.get_date() {
+        Some(date) => date,
+        None => return Ok(UpdateValidation::Accept),
+    };
+
+    let downloaded_date_str = match downloaded.get_date() {
+        Some(date) => date,
+        None => return Ok(UpdateValidation::Accept),
+    };
+
+    let builtin_date = match parse_model_date(builtin_date_str) {
+        Some(date) => date,
+        None => {
+            info!(
+                "Could not parse built-in date '{}', accepting update",
+                builtin_date_str
+            );
+            return Ok(UpdateValidation::Accept);
+        }
+    };
+
+    let downloaded_date = match parse_model_date(downloaded_date_str) {
+        Some(date) => date,
+        None => {
+            info!(
+                "Could not parse downloaded date '{}', accepting update",
+                downloaded_date_str
+            );
+            return Ok(UpdateValidation::Accept);
+        }
+    };
+
+    if downloaded_date < builtin_date {
+        warn!(
+            "Downloaded model has date '{}' which is older than built-in date '{}'. Rejecting update.",
+            downloaded_date_str, builtin_date_str
+        );
+        return Ok(UpdateValidation::RejectUseBuiltin);
+    }
+
+    info!(
+        "Date validation passed (downloaded: '{}', built-in: '{}')",
+        downloaded_date_str, builtin_date_str
+    );
+    Ok(UpdateValidation::Accept)
+}
+
+/// Parse a date string in the format "Month DDth YYYY" (e.g., "November 23th 2025")
+fn parse_model_date(date: &str) -> Option<NaiveDate> {
+    let parts: Vec<&str> = date.trim().split_whitespace().collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let month = match parts[0].to_lowercase().as_str() {
+        "january" => 1,
+        "february" => 2,
+        "march" => 3,
+        "april" => 4,
+        "may" => 5,
+        "june" => 6,
+        "july" => 7,
+        "august" => 8,
+        "september" => 9,
+        "october" => 10,
+        "november" => 11,
+        "december" => 12,
+        _ => return None,
+    };
+
+    let day_str = parts[1].trim_end_matches(|c: char| c.is_alphabetic());
+    let day: u32 = day_str.parse().ok()?;
+    let year: i32 = parts[2].parse().ok()?;
+
+    NaiveDate::from_ymd_opt(year, month, day)
 }
 
 #[cfg(test)]
@@ -518,6 +687,228 @@ mod tests {
             needs_update_result.unwrap(),
             false,
             "needs_update should return false for custom data"
+        );
+    }
+
+    // Test helper struct with CloudDate implementation
+    #[derive(Debug, Clone, PartialEq)]
+    struct DatedTestData {
+        content: String,
+        signature: String,
+        date: String,
+    }
+
+    impl CloudSignature for DatedTestData {
+        fn get_signature(&self) -> String {
+            self.signature.clone()
+        }
+        fn set_signature(&mut self, signature: String) {
+            self.signature = signature;
+        }
+    }
+
+    impl CloudDate for DatedTestData {
+        fn get_date(&self) -> Option<&str> {
+            if self.date.is_empty() {
+                None
+            } else {
+                Some(&self.date)
+            }
+        }
+    }
+
+    // Parser for dated test data (format: "content,signature,date")
+    fn dated_test_parser(data: &str) -> Result<DatedTestData> {
+        let parts: Vec<&str> = data.split(',').collect();
+        if parts.len() != 3 {
+            return Err(anyhow!("Invalid dated test data format"));
+        }
+        Ok(DatedTestData {
+            content: parts[0].to_string(),
+            signature: parts[1].to_string(),
+            date: parts[2].to_string(),
+        })
+    }
+
+    #[test]
+    fn test_parse_model_date_valid() {
+        let date1 = parse_model_date("November 23th 2025");
+        assert!(date1.is_some());
+        assert_eq!(date1.unwrap().to_string(), "2025-11-23");
+
+        let date2 = parse_model_date("January 1st 2024");
+        assert!(date2.is_some());
+        assert_eq!(date2.unwrap().to_string(), "2024-01-01");
+
+        let date3 = parse_model_date("December 31st 2023");
+        assert!(date3.is_some());
+        assert_eq!(date3.unwrap().to_string(), "2023-12-31");
+    }
+
+    #[test]
+    fn test_parse_model_date_invalid() {
+        assert!(parse_model_date("Invalid Date").is_none());
+        assert!(parse_model_date("November 2025").is_none());
+        assert!(parse_model_date("Foo 23th 2025").is_none());
+        assert!(parse_model_date("November 32nd 2025").is_none());
+        assert!(parse_model_date("").is_none());
+    }
+
+    #[test]
+    fn test_validate_model_dates_newer() {
+        let builtin = DatedTestData {
+            content: "old".to_string(),
+            signature: "sig1".to_string(),
+            date: "November 1st 2025".to_string(),
+        };
+        let downloaded = DatedTestData {
+            content: "new".to_string(),
+            signature: "sig2".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+
+        let result = validate_model_dates(&builtin, &downloaded).unwrap();
+        assert_eq!(result, UpdateValidation::Accept);
+    }
+
+    #[test]
+    fn test_validate_model_dates_older_rejects() {
+        let builtin = DatedTestData {
+            content: "new".to_string(),
+            signature: "sig1".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+        let downloaded = DatedTestData {
+            content: "old".to_string(),
+            signature: "sig2".to_string(),
+            date: "November 1st 2025".to_string(),
+        };
+
+        let result = validate_model_dates(&builtin, &downloaded).unwrap();
+        assert_eq!(result, UpdateValidation::RejectUseBuiltin);
+    }
+
+    #[test]
+    fn test_validate_model_dates_same() {
+        let builtin = DatedTestData {
+            content: "content1".to_string(),
+            signature: "sig1".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+        let downloaded = DatedTestData {
+            content: "content2".to_string(),
+            signature: "sig2".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+
+        let result = validate_model_dates(&builtin, &downloaded).unwrap();
+        assert_eq!(result, UpdateValidation::Accept);
+    }
+
+    #[test]
+    fn test_validate_model_dates_no_date() {
+        let builtin = DatedTestData {
+            content: "content1".to_string(),
+            signature: "sig1".to_string(),
+            date: "".to_string(),
+        };
+        let downloaded = DatedTestData {
+            content: "content2".to_string(),
+            signature: "sig2".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+
+        let result = validate_model_dates(&builtin, &downloaded).unwrap();
+        assert_eq!(result, UpdateValidation::Accept);
+    }
+
+    #[test]
+    fn test_validate_model_dates_invalid_format() {
+        let builtin = DatedTestData {
+            content: "content1".to_string(),
+            signature: "sig1".to_string(),
+            date: "Invalid Date".to_string(),
+        };
+        let downloaded = DatedTestData {
+            content: "content2".to_string(),
+            signature: "sig2".to_string(),
+            date: "November 23th 2025".to_string(),
+        };
+
+        let result = validate_model_dates(&builtin, &downloaded).unwrap();
+        assert_eq!(result, UpdateValidation::Accept);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_with_date_check_initialization() {
+        const DATED_BUILTIN: &str = "builtin_content,builtin_sig,November 1st 2025";
+
+        let model = CloudModel::initialize(
+            "test_dated_model.json".to_string(),
+            DATED_BUILTIN,
+            dated_test_parser,
+        )
+        .expect("Failed to initialize model");
+
+        let data = model.data.read().await;
+        assert_eq!(data.content, "builtin_content");
+        assert_eq!(data.date, "November 1st 2025");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_with_date_check_rejects_older() {
+        const DATED_BUILTIN: &str = "builtin_content,builtin_sig,November 23th 2025";
+
+        let model = CloudModel::initialize(
+            "test_dated_model.json".to_string(),
+            DATED_BUILTIN,
+            dated_test_parser,
+        )
+        .expect("Failed to initialize model");
+
+        // Simulate validator that would receive older data
+        let builtin_data = model.builtin_data.clone();
+        let older_data = DatedTestData {
+            content: "downloaded".to_string(),
+            signature: "new_sig".to_string(),
+            date: "November 1st 2025".to_string(),
+        };
+
+        let validation_result = validate_model_dates(&*builtin_data, &older_data).unwrap();
+        assert_eq!(
+            validation_result,
+            UpdateValidation::RejectUseBuiltin,
+            "Should reject older downloaded model"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_update_with_date_check_accepts_newer() {
+        const DATED_BUILTIN: &str = "builtin_content,builtin_sig,November 1st 2025";
+
+        let model = CloudModel::initialize(
+            "test_dated_model.json".to_string(),
+            DATED_BUILTIN,
+            dated_test_parser,
+        )
+        .expect("Failed to initialize model");
+
+        // Simulate validator that would receive newer data
+        let builtin_data = model.builtin_data.clone();
+        let newer_data = DatedTestData {
+            content: "downloaded".to_string(),
+            signature: "new_sig".to_string(),
+            date: "December 1st 2025".to_string(),
+        };
+
+        let validation_result = validate_model_dates(&*builtin_data, &newer_data).unwrap();
+        assert_eq!(
+            validation_result,
+            UpdateValidation::Accept,
+            "Should accept newer downloaded model"
         );
     }
 }
