@@ -191,9 +191,9 @@ checksum = "3a3076410a55c90011c298b04d0cfa770b00fa04e1e3c97d3f6c9de105a03844"
 
 [[package]]
 name = "flate2"
-version = "1.1.7"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2152dbcb980c05735e2a651d96011320a949eb31a0c8b38b72645ce97dec676"
+checksum = "bfe33edd8e85a12a67454e37f8c75e730830d83e313556ab9ebf9ee7fbeb3bfb"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -1316,8 +1316,8 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "undeadlock"
-version = "0.9.81"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#5c8793299b8140ea1c325e12d75c105c1c060ae9"
+version = "0.9.83"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#561889759a1d18c8b1289cd8b03d2cf9b319e356"
 dependencies = [
  "dashmap",
  "futures",
