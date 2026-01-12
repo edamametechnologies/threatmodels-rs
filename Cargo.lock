@@ -1330,7 +1330,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "undeadlock"
 version = "0.9.83"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#33752a5165a386455751a7859bcdc6f8ee8a7af1"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#d9bc91f8675745aef194af8dfe9ea750be8bd243"
 dependencies = [
  "dashmap",
  "futures",
