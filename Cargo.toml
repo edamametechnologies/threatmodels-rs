@@ -15,10 +15,8 @@ undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch
 
 tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
-# Prevent reqwest from using native-tls
-# Use ring crypto provider only - rustls-no-provider prevents reqwest from adding aws-lc-rs
-rustls = { version = "0.23.36", default-features = false, features = ["ring", "std", "tls12"] }
-reqwest = { version = "0.13.1", default-features = false, features = ["gzip", "rustls-no-provider", "webpki-roots"] }
+# Prevent reqwest from using native-tls, use rustls (aws-lc-rs default)
+reqwest = { version = "0.13.1", default-features = false, features = ["gzip", "rustls"] }
 anyhow = "1.0.86"
 serial_test = "3.1.1"
 chrono = "0.4"
