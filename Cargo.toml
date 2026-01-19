@@ -10,8 +10,8 @@ async_fn_in_trait = "allow"
 
 [dependencies]
 # Local copy in order to allow rapid development/debug
-undeadlock = { path = "../undeadlock" }
-#undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
+#undeadlock = { path = "../undeadlock" }
+undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 
 tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
