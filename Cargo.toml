@@ -15,7 +15,7 @@ undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch
 
 tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
-reqwest = { version = "0.13.1", default-features = false, features = ["gzip", "rustls-tls"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["gzip", "rustls"] }
 anyhow = "1.0.86"
 serial_test = "3.1.1"
 chrono = "0.4"
