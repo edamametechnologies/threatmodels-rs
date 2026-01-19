@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
-use reqwest::Client;
+use reqwest::{Client, Response, StatusCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -9,6 +9,82 @@ use undeadlock::CustomRwLock;
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Maximum number of retry attempts for transient HTTP errors
+const MAX_RETRIES: u32 = 3;
+/// Initial delay between retries (doubles with each attempt)
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+
+/// HTTP status codes that are considered retryable (transient errors)
+fn is_retryable_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS       // 429
+            | StatusCode::INTERNAL_SERVER_ERROR // 500
+            | StatusCode::BAD_GATEWAY           // 502
+            | StatusCode::SERVICE_UNAVAILABLE   // 503
+            | StatusCode::GATEWAY_TIMEOUT       // 504
+    )
+}
+
+/// Fetches a URL with retry logic for transient failures.
+/// Retries on connection errors, timeouts, and 5xx/429 status codes.
+async fn fetch_with_retry(client: &Client, url: &str) -> Result<Response> {
+    let mut last_error = None;
+    let mut delay_ms = INITIAL_RETRY_DELAY_MS;
+
+    for attempt in 1..=MAX_RETRIES {
+        match client.get(url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    return Ok(response);
+                }
+
+                if is_retryable_status(response.status()) && attempt < MAX_RETRIES {
+                    warn!(
+                        "Retryable HTTP {} from {} (attempt {}/{}), retrying in {}ms...",
+                        response.status(),
+                        url,
+                        attempt,
+                        MAX_RETRIES,
+                        delay_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms *= 2; // Exponential backoff
+                    continue;
+                }
+
+                // Non-retryable error or final attempt
+                return Err(anyhow!(
+                    "Failed to fetch data from: {}. HTTP Status: {}",
+                    url,
+                    response.status()
+                ));
+            }
+            Err(e) => {
+                // Connection errors and timeouts are retryable
+                if attempt < MAX_RETRIES {
+                    warn!(
+                        "Network error fetching {} (attempt {}/{}): {}. Retrying in {}ms...",
+                        url, attempt, MAX_RETRIES, e, delay_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms *= 2;
+                    last_error = Some(e);
+                    continue;
+                }
+                last_error = Some(e);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to fetch {} after {} attempts: {}",
+        url,
+        MAX_RETRIES,
+        last_error.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
 
 pub trait CloudSignature {
     fn get_signature(&self) -> String;
@@ -176,19 +252,9 @@ where
             .build()
             .context("Failed to build reqwest client")?;
 
-        let sig_response = client
-            .get(&sig_url)
-            .send()
+        let sig_response = fetch_with_retry(&client, &sig_url)
             .await
             .with_context(|| format!("Failed to fetch signature from: {}", sig_url))?;
-
-        if !sig_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch signature from: {}. HTTP Status: {}",
-                sig_url,
-                sig_response.status()
-            ));
-        }
 
         let new_signature = sig_response
             .text()
@@ -286,19 +352,9 @@ where
 
         let sig_url = Self::get_sig_url(branch, &self.file_name);
 
-        let sig_response = client
-            .get(&sig_url)
-            .send()
+        let sig_response = fetch_with_retry(&client, &sig_url)
             .await
             .with_context(|| format!("Failed to fetch signature from: {}", sig_url))?;
-
-        if !sig_response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch signature from: {}. HTTP Status: {}",
-                sig_url,
-                sig_response.status()
-            ));
-        }
 
         let new_signature = sig_response
             .text()
@@ -325,19 +381,9 @@ where
         let data_url = Self::get_data_url(branch, &self.file_name);
         trace!("Fetching data from URL: {}", data_url);
 
-        let response = client
-            .get(&data_url)
-            .send()
+        let response = fetch_with_retry(&client, &data_url)
             .await
             .with_context(|| format!("Failed to fetch data from: {}", data_url))?;
-
-        if !response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch data from: {}. HTTP Status: {}",
-                data_url,
-                response.status()
-            ));
-        }
 
         let json_text = response
             .text()
