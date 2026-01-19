@@ -15,8 +15,7 @@ undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch
 
 tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
-# Prevent reqwest from using native-tls
-rustls = { version = "0.23.36", features = ["ring"] }
+# Prevent reqwest from using native-tls (use rustls with aws-lc-rs default)
 reqwest = { version = "0.13.1", default-features = false, features = ["gzip", "rustls"] }
 anyhow = "1.0.86"
 serial_test = "3.1.1"
