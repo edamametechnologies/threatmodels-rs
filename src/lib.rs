@@ -23,7 +23,7 @@ fn is_retryable_status(status: StatusCode) -> bool {
             | StatusCode::INTERNAL_SERVER_ERROR // 500
             | StatusCode::BAD_GATEWAY           // 502
             | StatusCode::SERVICE_UNAVAILABLE   // 503
-            | StatusCode::GATEWAY_TIMEOUT       // 504
+            | StatusCode::GATEWAY_TIMEOUT // 504
     )
 }
 
