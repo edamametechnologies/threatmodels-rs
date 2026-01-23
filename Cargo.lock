@@ -1092,9 +1092,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17129e116933cf371d018bb80ae557e889637989d8638274fb25622827b03881"
+checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
@@ -1329,8 +1329,8 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "undeadlock"
-version = "0.9.86"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#7744e5ca3f45499319dc34a81dcd53d9579c0f2e"
+version = "0.9.88"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#3afb9db61221a386eb27bfc0b13b151898aaf724"
 dependencies = [
  "dashmap",
  "futures",
