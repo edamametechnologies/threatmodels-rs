@@ -1,0 +1,62 @@
+---
+description: "EDAMAME Models - Cloud-synchronized data model management"
+alwaysApply: true
+---
+
+# EDAMAME Models - Cloud Data Management
+
+> **Master Repository:** `edamame_app` - See `../edamame_app/.cursor/rules/workspace.mdc` for workspace-wide rules.
+
+## Project Overview
+
+The `edamame_models` crate provides a generic `CloudModel<T>` system for managing data that can be fetched from remote sources (GitHub repositories), updated based on signature changes, and accessed thread-safely.
+
+Used to dynamically pull threat models, whitelists, and blacklists from https://github.com/edamametechnologies/threatmodels.
+
+## Key Components
+
+- `CloudModel<T>` - Main struct wrapping data with cloud sync capabilities
+- `CloudSignature` trait - Required for types managed by CloudModel
+- `UpdateStatus` enum - Outcome of update operations
+
+## Source Files
+- `src/lib.rs` - Single-file implementation with CloudModel, traits, and HTTP fetching
+
+## Build & Test
+```bash
+cargo build
+cargo test
+```
+
+## Usage Pattern
+```rust
+lazy_static! {
+    pub static ref THREATS: CloudModel<ThreatMetrics> = {
+        CloudModel::initialize(
+            "threatmodel-macOS.json".to_string(),
+            BUILTIN_DATA,
+            |data| serde_json::from_str(data)
+        ).expect("Failed to initialize")
+    };
+}
+
+// Update from remote
+let status = THREATS.update("main", false, parser).await?;
+```
+
+## Remote Data Sources
+- Data: `https://raw.githubusercontent.com/edamametechnologies/threatmodels/{branch}/{filename}`
+- Signature: `https://raw.githubusercontent.com/edamametechnologies/threatmodels/{branch}/{filename}.sig`
+
+## Dependencies
+- `reqwest` - HTTP client
+- `tokio` - Async runtime
+- `undeadlock` - Thread-safe locks
+- `anyhow` - Error handling
+
+## Local Development
+Toggle local/git dependencies (run from edamame_app):
+```bash
+cd ../edamame_app && ./flip.sh local
+cd ../edamame_app && ./flip.sh git
+```
