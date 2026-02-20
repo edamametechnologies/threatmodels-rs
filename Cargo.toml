@@ -1,5 +1,5 @@
 [package]
-name = "edamame_models"
+name = "threatmodels_rs"
 version = "0.1.1"
 edition = "2021"
 authors = ["EDAMAME Technologies"]
@@ -10,8 +10,8 @@ async_fn_in_trait = "allow"
 
 [dependencies]
 # Local copy in order to allow rapid development/debug
-undeadlock = { path = "../undeadlock" }
-#undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
+#undeadlock = { path = "../undeadlock" }
+undeadlock = { git = "https://github.com/edamametechnologies/undeadlock", branch = "main" }
 
 tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
@@ -22,5 +22,5 @@ serial_test = "3.1.1"
 chrono = "0.4"
 
 [lib]
-name = "edamame_models"
+name = "threatmodels_rs"
 path = "src/lib.rs" 

@@ -4,7 +4,7 @@ A Rust crate providing cloud-based data model management with signature-based up
 
 ## Overview
 
-The `edamame_models` crate provides a generic `CloudModel<T>` system for managing data that can be:
+The `threatmodels-rs` crate provides a generic `CloudModel<T>` system for managing data that can be:
 - Fetched from remote sources (GitHub repositories)
 - Updated based on signature changes
 - Overridden with custom data
@@ -18,7 +18,7 @@ The `edamame_models` crate provides a generic `CloudModel<T>` system for managin
 The main struct that wraps data of type `T` and provides cloud synchronization capabilities.
 
 ```rust
-use edamame_models::{CloudModel, CloudSignature, UpdateStatus};
+use threatmodels_rs::{CloudModel, CloudSignature, UpdateStatus};
 
 // Your data type must implement CloudSignature
 #[derive(Clone)]

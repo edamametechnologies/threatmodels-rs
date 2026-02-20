@@ -170,19 +170,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "edamame_models"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "chrono",
- "reqwest",
- "serial_test",
- "tokio",
- "tracing",
- "undeadlock",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1162,6 +1149,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "threatmodels_rs"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "reqwest",
+ "serial_test",
+ "tokio",
+ "tracing",
+ "undeadlock",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1328,6 +1328,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "undeadlock"
 version = "1.0.2"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#72c492cd376158807ecd70adeb8b75c380312442"
 dependencies = [
  "dashmap",
  "futures",
