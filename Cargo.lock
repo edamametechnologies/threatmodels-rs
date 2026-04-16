@@ -1285,7 +1285,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 [[package]]
 name = "undeadlock"
 version = "1.2.0"
-source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#7e545681cfa50aaf6997b41d326fbfc91f99e01b"
+source = "git+https://github.com/edamametechnologies/undeadlock?branch=main#8e23667b321256630f0fb47a70a7ea83dfb06f95"
 dependencies = [
  "dashmap",
  "tokio",
