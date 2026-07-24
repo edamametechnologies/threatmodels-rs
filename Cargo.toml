@@ -8,6 +8,19 @@ license = "Apache-2.0"
 [lints.rust]
 async_fn_in_trait = "allow"
 
+[features]
+default = ["platform_certs"]
+# Trust the OS/platform certificate store (system CAs, including enterprise
+# TLS-inspection proxies such as Netskope or Zscaler) via
+# rustls-platform-verifier instead of only the bundled webpki (Mozilla) roots.
+# No-op on Android (the Android verifier needs a JNI-bound Kotlin component and
+# one-time runtime init that is not wired here) -> Android falls back to the
+# bundled webpki roots. See src/tls.rs.
+platform_certs = ["dep:rustls", "dep:rustls-platform-verifier"]
+# Expose the blocking client builder from `tls` for consumers that build
+# `reqwest::blocking` clients (e.g. edamame_foundation).
+blocking = ["reqwest/blocking"]
+
 [dependencies]
 # Local copy in order to allow rapid development/debug
 #undeadlock = { path = "../undeadlock" }
@@ -17,6 +30,13 @@ tracing = "0.1.40"
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
 # Use rustls with ring via reqwest 0.12
 reqwest = { version = "0.12.28", default-features = false, features = ["gzip", "rustls-tls-webpki-roots"] }
+# Optional platform certificate verifier (activated by the `platform_certs`
+# feature). Pinned to the ring crypto provider to match reqwest's backend and
+# to keep aws-lc-rs out of cross-compiled builds. rustls-platform-verifier
+# itself depends on rustls with default-features=false (no provider), so the
+# provider is entirely determined here.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
 anyhow = "1.0.86"
 serial_test = "3.1.1"
 chrono = "0.4"

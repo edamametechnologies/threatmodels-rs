@@ -7,6 +7,9 @@ use tokio::time::Duration;
 use tracing::{error, info, trace, warn};
 use undeadlock::CustomRwLock;
 
+/// Shared HTTP client construction (workspace TLS trust policy / platform verifier).
+pub mod tls;
+
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -246,7 +249,7 @@ where
 
         let sig_url = Self::get_sig_url(branch, &self.file_name);
 
-        let client = Client::builder()
+        let client = tls::client_builder()
             .gzip(true)
             .timeout(TIMEOUT)
             .build()
@@ -344,7 +347,7 @@ where
             self.file_name, branch
         );
 
-        let client = Client::builder()
+        let client = tls::client_builder()
             .gzip(true)
             .timeout(TIMEOUT)
             .build()
