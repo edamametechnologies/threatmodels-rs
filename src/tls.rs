@@ -52,9 +52,19 @@ fn platform_client_config() -> rustls::ClientConfig {
                 .with_platform_verifier()
                 .expect("platform certificate verifier is available on this target")
                 .with_no_client_auth();
-            // Preserve reqwest's default ALPN advertisement so HTTP/2 is still
-            // negotiated when the server supports it.
-            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            // Mirror reqwest's own ALPN policy for its built-in rustls backend:
+            // advertise `h2` ONLY when reqwest is compiled with its `http2`
+            // feature. Because `use_preconfigured_tls` hands this config to
+            // reqwest verbatim (it does NOT re-derive ALPN like the built-in
+            // backend does), advertising `h2` unconditionally would make the
+            // server negotiate HTTP/2 and then hyper panics with
+            // "http2 feature is not enabled". The `http2` feature (default off)
+            // enables `reqwest/http2` and this `h2` entry together.
+            config.alpn_protocols = vec![
+                #[cfg(feature = "http2")]
+                b"h2".to_vec(),
+                b"http/1.1".to_vec(),
+            ];
             config
         })
         .clone()

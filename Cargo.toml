@@ -20,6 +20,13 @@ platform_certs = ["dep:rustls", "dep:rustls-platform-verifier"]
 # Expose the blocking client builder from `tls` for consumers that build
 # `reqwest::blocking` clients (e.g. edamame_foundation).
 blocking = ["reqwest/blocking"]
+# Advertise HTTP/2 (h2) in the platform-verifier client's ALPN. OFF by default:
+# every workspace crate builds reqwest without its `http2` feature, so hyper
+# cannot service an h2 connection and panics ("http2 feature is not enabled") if
+# a server negotiates h2. Enabling this passes `reqwest/http2` through (Cargo
+# feature unification turns it on for the whole build) and adds `h2` to the ALPN
+# list so the two stay consistent. See src/tls.rs.
+http2 = ["reqwest/http2"]
 
 [dependencies]
 # Local copy in order to allow rapid development/debug
