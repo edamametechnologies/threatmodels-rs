@@ -27,6 +27,14 @@ blocking = ["reqwest/blocking"]
 # feature unification turns it on for the whole build) and adds `h2` to the ALPN
 # list so the two stay consistent. See src/tls.rs.
 http2 = ["reqwest/http2"]
+# Authenticate every downloaded model against the Ed25519-signed manifests in
+# the threatmodels repository (see src/authenticity.rs). OFF by default: with
+# it off, downloads are loaded as today and report `ModelProvenance::Downloaded`.
+# Turning it on without real keys in `authenticity::PRODUCTION_ROOT_KEYS` is a
+# compile error, so a build cannot claim verification it does not perform.
+# Publish the signed manifests BEFORE shipping a client with it on: such a
+# client keeps its embedded models until a manifest verifies.
+model-signatures = []
 
 [dependencies]
 # Local copy in order to allow rapid development/debug
@@ -45,6 +53,11 @@ reqwest = { version = "0.12.28", default-features = false, features = ["gzip", "
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
 rustls-platform-verifier = { version = "0.7", optional = true }
 anyhow = "1.0.86"
+# Ed25519 verification and SHA-256 for the signed manifests. ring is already in
+# the tree through rustls/reqwest, so this adds no crate.
+ring = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 serial_test = "3.1.1"
 chrono = "0.4"
 

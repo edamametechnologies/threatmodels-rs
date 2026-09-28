@@ -1,14 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
 use reqwest::{Client, Response, StatusCode};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{error, info, trace, warn};
 use undeadlock::CustomRwLock;
 
+/// Ed25519-signed manifests authenticating the published models.
+pub mod authenticity;
 /// Shared HTTP client construction (workspace TLS trust policy / platform verifier).
 pub mod tls;
+
+pub use authenticity::{ManifestScope, ModelAuthenticator, TrustedKey, VerifiedManifest};
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
@@ -32,7 +36,7 @@ fn is_retryable_status(status: StatusCode) -> bool {
 
 /// Fetches a URL with retry logic for transient failures.
 /// Retries on connection errors, timeouts, and 5xx/429 status codes.
-async fn fetch_with_retry(client: &Client, url: &str) -> Result<Response> {
+pub(crate) async fn fetch_with_retry(client: &Client, url: &str) -> Result<Response> {
     let mut last_error = None;
     let mut delay_ms = INITIAL_RETRY_DELAY_MS;
 
@@ -120,6 +124,40 @@ pub enum UpdateValidation {
     RejectKeepCurrent,
 }
 
+/// Where the data a [`CloudModel`] currently holds came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelProvenance {
+    /// The snapshot embedded in the binary.
+    Embedded,
+    /// Set locally through `set_custom_data` / `overwrite_with_test_data`.
+    Custom,
+    /// Downloaded without authentication (no [`ModelAuthenticator`]: the
+    /// `model-signatures` feature is off). Only the TLS channel vouches for it.
+    Downloaded,
+    /// Downloaded and matched against an Ed25519-signed manifest.
+    DownloadedVerified,
+}
+
+impl ModelProvenance {
+    fn to_u8(self) -> u8 {
+        match self {
+            ModelProvenance::Embedded => 0,
+            ModelProvenance::Custom => 1,
+            ModelProvenance::Downloaded => 2,
+            ModelProvenance::DownloadedVerified => 3,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => ModelProvenance::Custom,
+            2 => ModelProvenance::Downloaded,
+            3 => ModelProvenance::DownloadedVerified,
+            _ => ModelProvenance::Embedded,
+        }
+    }
+}
+
 /// A generic model for handling cloud-based data fetching and updating.
 #[derive(Debug, Clone)]
 pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
@@ -128,6 +166,10 @@ pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
     is_custom: Arc<AtomicBool>,
     builtin_data: Arc<T>,
     update_in_progress: Arc<AtomicBool>,
+    base_url: String,
+    authenticator: Option<Arc<ModelAuthenticator>>,
+    provenance: Arc<AtomicU8>,
+    last_authenticity_error: Arc<CustomRwLock<Option<String>>>,
 }
 
 impl<T> CloudModel<T>
@@ -150,7 +192,45 @@ where
             is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
             update_in_progress: Arc::new(AtomicBool::new(false)),
+            base_url: BASE_URL.to_string(),
+            authenticator: ModelAuthenticator::production(),
+            provenance: Arc::new(AtomicU8::new(ModelProvenance::Embedded.to_u8())),
+            last_authenticity_error: Arc::new(CustomRwLock::new(None)),
         })
+    }
+
+    /// Replace the authenticator (tests, or a caller with its own key set).
+    /// `None` disables authentication: downloads report
+    /// [`ModelProvenance::Downloaded`].
+    pub fn with_authenticator(mut self, authenticator: Option<Arc<ModelAuthenticator>>) -> Self {
+        self.authenticator = authenticator;
+        self
+    }
+
+    /// Fetch from another origin than the threatmodels repository (tests).
+    #[doc(hidden)]
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        self.base_url = base_url.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Whether downloads are checked against a signed manifest.
+    pub fn authenticity_enforced(&self) -> bool {
+        self.authenticator.is_some()
+    }
+
+    /// Where the current data came from.
+    pub fn provenance(&self) -> ModelProvenance {
+        ModelProvenance::from_u8(self.provenance.load(Ordering::Acquire))
+    }
+
+    fn set_provenance(&self, provenance: ModelProvenance) {
+        self.provenance.store(provenance.to_u8(), Ordering::Release);
+    }
+
+    /// Why the last download was refused, if it was.
+    pub async fn last_authenticity_error(&self) -> Option<String> {
+        self.last_authenticity_error.read().await.clone()
     }
 
     /// Initializes an empty CloudModel for testing purposes.
@@ -167,6 +247,10 @@ where
             is_custom: Arc::new(AtomicBool::new(false)),
             builtin_data,
             update_in_progress: Arc::new(AtomicBool::new(false)),
+            base_url: BASE_URL.to_string(),
+            authenticator: ModelAuthenticator::production(),
+            provenance: Arc::new(AtomicU8::new(ModelProvenance::Embedded.to_u8())),
+            last_authenticity_error: Arc::new(CustomRwLock::new(None)),
         }
     }
 
@@ -174,6 +258,7 @@ where
     pub async fn set_custom_data(&self, data: T) {
         *self.data.write().await = data;
         self.is_custom.store(true, Ordering::Relaxed);
+        self.set_provenance(ModelProvenance::Custom);
         info!(
             "Set custom data for file: '{}'. Updates will be skipped.",
             self.file_name
@@ -185,6 +270,7 @@ where
         if self.is_custom.load(Ordering::Relaxed) {
             *self.data.write().await = (*self.builtin_data).clone();
             self.is_custom.store(false, Ordering::Relaxed);
+            self.set_provenance(ModelProvenance::Embedded);
             info!(
                 "Reset data to default for file: '{}'. Updates are now enabled.",
                 self.file_name
@@ -207,6 +293,7 @@ where
     pub async fn overwrite_with_test_data(&self, data: T) {
         *self.data.write().await = data;
         self.is_custom.store(true, Ordering::Relaxed);
+        self.set_provenance(ModelProvenance::Custom);
         info!(
             "Overwrote with test data for file: '{}'. Marked as custom.",
             self.file_name
@@ -222,6 +309,19 @@ where
     /// Constructs the URL to fetch the data file.
     pub fn get_data_url(branch: &str, file_name: &str) -> String {
         format!("{}/{}/{}", BASE_URL, branch, file_name)
+    }
+
+    fn sig_url(&self, branch: &str) -> String {
+        format!(
+            "{}/{}/{}.sig",
+            self.base_url,
+            branch,
+            self.file_name.replace(".json", "")
+        )
+    }
+
+    fn data_url(&self, branch: &str) -> String {
+        format!("{}/{}/{}", self.base_url, branch, self.file_name)
     }
 
     /// Retrieves the current signature from the data.
@@ -247,7 +347,7 @@ where
             return Ok(false);
         }
 
-        let sig_url = Self::get_sig_url(branch, &self.file_name);
+        let sig_url = self.sig_url(branch);
 
         let client = tls::client_builder()
             .gzip(true)
@@ -353,7 +453,7 @@ where
             .build()
             .context("Failed to build reqwest client")?;
 
-        let sig_url = Self::get_sig_url(branch, &self.file_name);
+        let sig_url = self.sig_url(branch);
 
         let sig_response = fetch_with_retry(&client, &sig_url)
             .await
@@ -381,7 +481,7 @@ where
             return Ok(UpdateStatus::NotUpdated);
         }
 
-        let data_url = Self::get_data_url(branch, &self.file_name);
+        let data_url = self.data_url(branch);
         trace!("Fetching data from URL: {}", data_url);
 
         let response = fetch_with_retry(&client, &data_url)
@@ -395,6 +495,42 @@ where
 
         trace!("Received JSON data: {}", json_text);
 
+        // Authenticate before parsing: an unverified download never reaches
+        // the parser, the validator or `data`.
+        let downloaded_provenance = match &self.authenticator {
+            None => ModelProvenance::Downloaded,
+            Some(authenticator) => match authenticator
+                .verify_published_file(
+                    &client,
+                    &self.base_url,
+                    branch,
+                    &self.file_name,
+                    json_text.as_bytes(),
+                )
+                .await
+            {
+                Ok(manifest) => {
+                    info!(
+                        "Verified '{}' against the {} manifest (sequence {}, signer {:?})",
+                        self.file_name,
+                        manifest.scope.as_str(),
+                        manifest.sequence,
+                        manifest.signer
+                    );
+                    *self.last_authenticity_error.write().await = None;
+                    ModelProvenance::DownloadedVerified
+                }
+                Err(err) => {
+                    warn!(
+                        "Refusing unverified download of '{}' from branch '{}', keeping current data: {:#}",
+                        self.file_name, branch, err
+                    );
+                    *self.last_authenticity_error.write().await = Some(format!("{err:#}"));
+                    return Ok(UpdateStatus::NotUpdated);
+                }
+            },
+        };
+
         match parser(&json_text) {
             Ok(mut new_data) => {
                 // Run custom validator first
@@ -407,6 +543,7 @@ where
                             let mut data = self.data.write().await;
                             *data = new_data;
                         }
+                        self.set_provenance(downloaded_provenance);
                         info!("Successfully updated file: '{}'", self.file_name);
                         Ok(UpdateStatus::Updated)
                     }
@@ -417,6 +554,7 @@ where
                         );
                         let mut data = self.data.write().await;
                         *data = (*self.builtin_data).clone();
+                        self.set_provenance(ModelProvenance::Embedded);
                         Ok(UpdateStatus::NotUpdated)
                     }
                     UpdateValidation::RejectKeepCurrent => {

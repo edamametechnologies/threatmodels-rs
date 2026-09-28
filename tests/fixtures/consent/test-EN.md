@@ -1,0 +1,3 @@
+# Test consent
+
+Accentué text.

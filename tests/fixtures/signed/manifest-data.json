@@ -1,0 +1,11 @@
+{
+  "branch": "main",
+  "files": {
+    "consent/test-EN.md": "49a8a41b60345df2eb2bcbaf65587743758baa7679655e942f437310fbdc2d26",
+    "test-db.json": "40e4e65e38df1ba914b870e8a005bba1ab77960228a6bd3e5ea419f572f8f0a9"
+  },
+  "format": 1,
+  "issued_at": "2026-09-10T00:26:40Z",
+  "scope": "data",
+  "sequence": 1789000000
+}
