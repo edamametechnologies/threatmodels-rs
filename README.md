@@ -209,7 +209,11 @@ Ed25519-signed manifest before it is parsed (`src/authenticity.rs`):
 
 A download that does not verify is never parsed: the model keeps its current
 data (the embedded snapshot or an earlier verified download) and
-`last_authenticity_error()` says why. `provenance()` reports where the current
+`last_authenticity_error()` says why. While the origin keeps publishing that
+same version (same `.sig`), it is not downloaded again for 10 minutes: an
+update fetches only the `.sig` (the EDAMAME helper updates on every metric
+order whose model signature differs from its copy). `force`, or a new `.sig`,
+downloads at once. `provenance()` reports where the current
 data came from: `Embedded`, `Custom` (set locally), `Downloaded` (feature off:
 only TLS vouches for it) or `DownloadedVerified`. Only `main` is signed: a
 build that reads models from another branch keeps its embedded models.

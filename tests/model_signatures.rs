@@ -308,6 +308,86 @@ async fn refused_download_keeps_previously_verified_data() {
     assert_eq!(model.provenance(), ModelProvenance::DownloadedVerified);
 }
 
+/// While the origin publishes a version that did not verify (same `.sig`),
+/// an update fetches only the `.sig`: the helper updates on every metric
+/// order whose signature differs from its copy. `force` and a new `.sig`
+/// download again.
+#[tokio::test]
+async fn refused_version_is_not_downloaded_again_during_the_backoff() {
+    let m = manifest("data", "main", 10, &[(DATA_FILE, REMOTE)]);
+    let s = envelope(vec![root_entry(&root_a(), &m)]);
+    let tampered: &[u8] = br#"{"content":"evil","signature":"remote-sig"}"#;
+    let (base, files, requests) = serve(layout(DATA_FILE, tampered, Some((m, s)))).await;
+    let model = model(DATA_FILE, &base, Some(authenticator(&[&root_a()])));
+
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(requests.read().await.len(), 4);
+
+    // Same published version: the `.sig` only.
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(requests.read().await[4..], ["/main/test-data.sig"]);
+    assert_eq!(model.data.read().await.content, "builtin");
+
+    // `force` downloads (and refuses) again.
+    assert_eq!(
+        model.update("main", true, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(requests.read().await.len(), 9);
+    assert_eq!(model.provenance(), ModelProvenance::Embedded);
+
+    // The origin publishes the signed version: a new `.sig`, fetched at once.
+    {
+        let mut f = files.write().await;
+        f.insert("/main/test-data.json".into(), REMOTE.to_vec());
+        f.insert(
+            "/main/test-data.sig".into(),
+            sha256_hex(REMOTE).into_bytes(),
+        );
+    }
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::Updated
+    );
+    assert_eq!(model.provenance(), ModelProvenance::DownloadedVerified);
+    assert_eq!(model.last_authenticity_error().await, None);
+}
+
+/// A manifest signed after its model (the data signing run follows each
+/// merge): the same `.sig` verifies once the backoff is over.
+#[tokio::test]
+async fn refused_version_is_downloaded_again_after_the_backoff() {
+    let before = manifest("data", "main", 10, &[(DATA_FILE, b"previous")]);
+    let before_sig = envelope(vec![root_entry(&root_a(), &before)]);
+    let (base, files, _) = serve(layout(DATA_FILE, REMOTE, Some((before, before_sig)))).await;
+    let model = model(DATA_FILE, &base, Some(authenticator(&[&root_a()])))
+        .with_refused_download_backoff(std::time::Duration::ZERO);
+
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    // The signing run lands; the model and its `.sig` did not change.
+    let after = manifest("data", "main", 11, &[(DATA_FILE, REMOTE)]);
+    let after_sig = envelope(vec![root_entry(&root_a(), &after)]);
+    {
+        let mut f = files.write().await;
+        f.insert("/main/signed/manifest-data.json".into(), after);
+        f.insert("/main/signed/manifest-data.sig.json".into(), after_sig);
+    }
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::Updated
+    );
+    assert_eq!(model.provenance(), ModelProvenance::DownloadedVerified);
+}
+
 /// New client, OLD repository layout (no `signed/` directory yet): the
 /// download is refused and the embedded model stays in place.
 #[tokio::test]

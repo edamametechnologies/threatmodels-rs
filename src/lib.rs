@@ -4,7 +4,7 @@ use reqwest::{Client, Response, StatusCode};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use tokio::time::Duration;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use undeadlock::{CustomDashMap, CustomRwLock};
 
 /// Ed25519-signed manifests authenticating the published models.
@@ -16,6 +16,16 @@ pub use authenticity::{ManifestScope, ModelAuthenticator, TrustedKey, VerifiedMa
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a download refused for authenticity is not fetched again while
+/// the origin keeps publishing it (same `.sig`). Without it, every caller
+/// that finds the signature changed would download the model and both
+/// manifest files again: the helper does so on each metric order whose
+/// model signature differs from its copy, for as long as `main` serves a
+/// model its manifest does not cover (an unsigned threat-model merge).
+/// The core's own update cycle is 10 minutes too; a manifest signed after
+/// its model (the data signing run follows each merge) is picked up at most
+/// this late.
+const REFUSED_DOWNLOAD_BACKOFF: Duration = Duration::from_secs(10 * 60);
 
 /// Maximum number of retry attempts for transient HTTP errors
 const MAX_RETRIES: u32 = 3;
@@ -236,6 +246,16 @@ pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
     authenticator: Option<Arc<ModelAuthenticator>>,
     provenance: Arc<AtomicU8>,
     last_authenticity_error: Arc<CustomRwLock<Option<String>>>,
+    /// The `.sig` of the last download refused for authenticity, and when.
+    refused_download: Arc<CustomRwLock<Option<RefusedDownload>>>,
+    refused_download_backoff: Duration,
+}
+
+/// A published version whose download did not verify.
+#[derive(Debug, Clone)]
+struct RefusedDownload {
+    signature: String,
+    at: std::time::Instant,
 }
 
 impl<T> CloudModel<T>
@@ -262,6 +282,8 @@ where
             authenticator: ModelAuthenticator::production(),
             provenance: Arc::new(AtomicU8::new(ModelProvenance::Embedded.to_u8())),
             last_authenticity_error: Arc::new(CustomRwLock::new(None)),
+            refused_download: Arc::new(CustomRwLock::new(None)),
+            refused_download_backoff: REFUSED_DOWNLOAD_BACKOFF,
         };
         model.register();
         Ok(model)
@@ -292,6 +314,13 @@ where
     #[doc(hidden)]
     pub fn with_base_url(mut self, base_url: &str) -> Self {
         self.base_url = base_url.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Override how long a refused download is not fetched again (tests).
+    #[doc(hidden)]
+    pub fn with_refused_download_backoff(mut self, backoff: Duration) -> Self {
+        self.refused_download_backoff = backoff;
         self
     }
 
@@ -332,6 +361,8 @@ where
             authenticator: ModelAuthenticator::production(),
             provenance: Arc::new(AtomicU8::new(ModelProvenance::Embedded.to_u8())),
             last_authenticity_error: Arc::new(CustomRwLock::new(None)),
+            refused_download: Arc::new(CustomRwLock::new(None)),
+            refused_download_backoff: REFUSED_DOWNLOAD_BACKOFF,
         }
     }
 
@@ -562,6 +593,23 @@ where
             return Ok(UpdateStatus::NotUpdated);
         }
 
+        // The version the origin publishes did not verify a moment ago: it
+        // would not now either (see REFUSED_DOWNLOAD_BACKOFF).
+        if !force && self.authenticator.is_some() {
+            if let Some(refused) = self.refused_download.read().await.as_ref() {
+                if refused.signature == new_signature
+                    && refused.at.elapsed() < self.refused_download_backoff
+                {
+                    debug!(
+                        "Not downloading '{}' again: this version was refused {}s ago",
+                        self.file_name,
+                        refused.at.elapsed().as_secs()
+                    );
+                    return Ok(UpdateStatus::NotUpdated);
+                }
+            }
+        }
+
         let data_url = self.data_url(branch);
         trace!("Fetching data from URL: {}", data_url);
 
@@ -599,6 +647,7 @@ where
                         manifest.signer
                     );
                     *self.last_authenticity_error.write().await = None;
+                    *self.refused_download.write().await = None;
                     ModelProvenance::DownloadedVerified
                 }
                 Err(err) => {
@@ -607,6 +656,10 @@ where
                         self.file_name, branch, err
                     );
                     *self.last_authenticity_error.write().await = Some(format!("{err:#}"));
+                    *self.refused_download.write().await = Some(RefusedDownload {
+                        signature: new_signature.clone(),
+                        at: std::time::Instant::now(),
+                    });
                     return Ok(UpdateStatus::NotUpdated);
                 }
             },
