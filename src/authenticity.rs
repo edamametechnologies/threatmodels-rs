@@ -63,12 +63,28 @@ pub const PRODUCTION_ROOT_KEYS: &[&str] = &[
     "e1fcfd06a9baafc2f4c9cd5ba5d2b8721c1e7e4df5adbb027549f8ff740319cb",
 ];
 
-/// Lowest manifest sequence accepted, per scope, before any download. Raise
-/// it with each release to the sequence of the manifest that matches the
-/// embedded snapshots, so a fresh process cannot be rolled back further than
-/// what it ships with.
-pub const EMBEDDED_SEQUENCE_FLOOR_EXEC: u64 = 0;
-pub const EMBEDDED_SEQUENCE_FLOOR_DATA: u64 = 0;
+/// Lowest manifest sequence accepted, per scope, before any download: a
+/// fresh process refuses an older manifest even when it is validly signed,
+/// so a replayed old manifest cannot roll it back further than what it
+/// ships with. The floor a process enforces then rises with every manifest
+/// it accepts ([`ModelAuthenticator::highest_sequence`]); that rise is not
+/// persisted, so every start begins again from these constants.
+///
+/// How they move: at each release, set them to the `sequence` of
+/// `signed/manifest-exec.json` and `signed/manifest-data.json` on
+/// threatmodels `main` at the commit whose models the release embeds, and
+/// copy those four `signed/` files into `tests/fixtures/production/`:
+/// `tests/sequence_floors.rs` checks that the production root keys verify
+/// them and that their sequences are the floors. Never set a floor above a
+/// sequence `main` serves: every verifying client would then refuse every
+/// download of that scope and keep its embedded models. `main`'s sequences
+/// only grow (a manifest's sequence is the Unix time it was built), so a
+/// floor taken from what `main` serves stays safe.
+///
+/// Set 2026-09-29 to the first signed manifests: exec 1790681588 (root A),
+/// data 1790684367 (CI key c00da6eb02879a2d, certified by root A).
+pub const EMBEDDED_SEQUENCE_FLOOR_EXEC: u64 = 1_790_681_588;
+pub const EMBEDDED_SEQUENCE_FLOOR_DATA: u64 = 1_790_684_367;
 
 #[cfg(feature = "model-signatures")]
 const _: () = assert!(

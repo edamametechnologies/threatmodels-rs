@@ -193,6 +193,50 @@ lazy_static! {
 }
 ```
 
+## Model signatures (`model-signatures` feature)
+
+The `.sig` next to each model is an unkeyed SHA-256 served by the same origin:
+it tells a client that a model changed, not who published it. With the
+`model-signatures` feature, every download is also checked against an
+Ed25519-signed manifest before it is parsed (`src/authenticity.rs`):
+
+- `signed/manifest-exec.json` covers the `threatmodel-*.json` files, whose
+  scripts the EDAMAME helper runs as root/SYSTEM. It must be signed by one of
+  the two embedded root keys (`PRODUCTION_ROOT_KEYS`), kept offline.
+- `signed/manifest-data.json` covers every other model and the consent pages.
+  It may be signed by a root key, or by a CI key carrying a root-signed
+  certificate that has not expired.
+
+A download that does not verify is never parsed: the model keeps its current
+data (the embedded snapshot or an earlier verified download) and
+`last_authenticity_error()` says why. `provenance()` reports where the current
+data came from: `Embedded`, `Custom` (set locally), `Downloaded` (feature off:
+only TLS vouches for it) or `DownloadedVerified`. Only `main` is signed: a
+build that reads models from another branch keeps its embedded models.
+
+EDAMAME enables the feature in every shipped build: through `edamame_core`'s
+default features (app, posture, cli) and on the helper's `edamame_foundation`
+dependency. Enabling it with `PRODUCTION_ROOT_KEYS` empty is a compile error.
+
+### Rollback floors
+
+A manifest is refused when its `sequence` is lower than the highest one the
+process accepted for that scope, or than the embedded floor
+(`EMBEDDED_SEQUENCE_FLOOR_EXEC` / `EMBEDDED_SEQUENCE_FLOOR_DATA`), so a replayed
+old manifest cannot roll a client back. The in-process floor is not persisted:
+every start begins again from the embedded floors.
+
+At each release, set the floors to the sequences of `signed/manifest-exec.json`
+and `signed/manifest-data.json` on threatmodels `main` at the commit whose
+models the release embeds, and copy those four `signed/` files into
+`tests/fixtures/production/`. `tests/sequence_floors.rs` checks that the
+production keys verify them and that their sequences are the floors. A floor
+must never exceed a sequence `main` serves, or every verifying client refuses
+every download of that scope; sequences only grow (a manifest's sequence is
+the Unix time it was built), so a floor taken from `main` stays safe. Current
+floors (2026-09-29, the first signed manifests): exec 1790681588, data
+1790684367.
+
 ## Configuration
 
 The crate uses these default settings:
