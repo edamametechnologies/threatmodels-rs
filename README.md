@@ -217,6 +217,16 @@ build that reads models from another branch keeps its embedded models.
 EDAMAME enables the feature in every shipped build: through `edamame_core`'s
 default features (app, posture, cli) and on the helper's `edamame_foundation`
 dependency. Enabling it with `PRODUCTION_ROOT_KEYS` empty is a compile error.
+`authenticity::SIGNATURES_ENFORCED` tells whether the build has it.
+
+### Status
+
+`model_authenticity_states()` lists every model the process initialized
+(`CloudModel::initialize` registers it), by file name, with its scope
+(`exec` / `data`), whether its downloads are authenticated, its provenance and
+its last authenticity error. It reads shared handles only, never a model's data
+lock. `ModelProvenance::as_str()` gives the stable names status reports use:
+`embedded`, `custom`, `downloaded`, `downloaded_verified`.
 
 ### Rollback floors
 

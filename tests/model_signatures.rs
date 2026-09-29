@@ -12,7 +12,9 @@ use threatmodels_rs::authenticity::{
     certificate_message, hex_encode, key_id, manifest_message, sha256_hex, ManifestScope,
     ModelAuthenticator, Signer, TrustedKey,
 };
-use threatmodels_rs::{CloudModel, CloudSignature, ModelProvenance, UpdateStatus};
+use threatmodels_rs::{
+    model_authenticity_states, CloudModel, CloudSignature, ModelProvenance, UpdateStatus,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use undeadlock::CustomRwLock;
@@ -356,6 +358,64 @@ async fn old_client_path_on_new_layout_is_unchanged() {
         UpdateStatus::NotUpdated
     );
     assert_eq!(requests.read().await.len(), 3);
+}
+
+/// The status registry: every initialized model with where its data came
+/// from and why its last download was refused.
+#[tokio::test]
+async fn registry_reports_provenance_and_refusals() {
+    const VERIFIED: &str = "registry-verified-db.json";
+    const REFUSED: &str = "registry-refused-db.json";
+    const PLAIN: &str = "registry-plain-db.json";
+    const EXEC: &str = "threatmodel-Registry.json";
+    let m = manifest("data", "main", 10, &[(VERIFIED, REMOTE), (REFUSED, REMOTE)]);
+    let s = envelope(vec![root_entry(&root_a(), &m)]);
+    let evil: &[u8] = br#"{"content":"evil","signature":"evil-sig"}"#;
+    let mut files = layout(VERIFIED, REMOTE, Some((m.clone(), s.clone())));
+    files.extend(layout(REFUSED, evil, Some((m, s))));
+    let (base, _, _) = serve(files).await;
+
+    let verified = model(VERIFIED, &base, Some(authenticator(&[&root_a()])));
+    let refused = model(REFUSED, &base, Some(authenticator(&[&root_a()])));
+    let _plain = model(PLAIN, &base, None);
+    let _exec = model(EXEC, &base, Some(authenticator(&[&root_a()])));
+    assert_eq!(
+        verified.update("main", false, parse).await.unwrap(),
+        UpdateStatus::Updated
+    );
+    assert_eq!(
+        refused.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+
+    let states = model_authenticity_states().await;
+    let state = |name: &str| {
+        states
+            .iter()
+            .find(|s| s.file_name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name} is registered: {states:?}"))
+    };
+    let v = state(VERIFIED);
+    assert_eq!(v.provenance, ModelProvenance::DownloadedVerified);
+    assert_eq!(v.provenance.as_str(), "downloaded_verified");
+    assert_eq!(v.scope, ManifestScope::Data);
+    assert!(v.authenticity_enforced);
+    assert_eq!(v.last_authenticity_error, None);
+
+    let r = state(REFUSED);
+    assert_eq!(r.provenance, ModelProvenance::Embedded);
+    assert!(
+        r.last_authenticity_error
+            .as_deref()
+            .is_some_and(|e| e.contains("does not match")),
+        "{r:?}"
+    );
+
+    // `with_authenticator(None)` after `initialize` is what the registry says.
+    assert!(!state(PLAIN).authenticity_enforced);
+    assert_eq!(state(EXEC).scope, ManifestScope::Exec);
+    assert!(states.windows(2).all(|w| w[0].file_name <= w[1].file_name));
 }
 
 // ================================================================ verifier

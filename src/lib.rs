@@ -2,10 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
 use reqwest::{Client, Response, StatusCode};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::time::Duration;
 use tracing::{error, info, trace, warn};
-use undeadlock::CustomRwLock;
+use undeadlock::{CustomDashMap, CustomRwLock};
 
 /// Ed25519-signed manifests authenticating the published models.
 pub mod authenticity;
@@ -156,6 +156,72 @@ impl ModelProvenance {
             _ => ModelProvenance::Embedded,
         }
     }
+
+    /// Stable name for status reports: `embedded`, `custom`, `downloaded`,
+    /// `downloaded_verified`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelProvenance::Embedded => "embedded",
+            ModelProvenance::Custom => "custom",
+            ModelProvenance::Downloaded => "downloaded",
+            ModelProvenance::DownloadedVerified => "downloaded_verified",
+        }
+    }
+}
+
+/// Authenticity state of one model this process initialized, as
+/// [`model_authenticity_states`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelAuthenticityState {
+    /// Published path, e.g. `threatmodel-macOS.json`.
+    pub file_name: String,
+    pub scope: ManifestScope,
+    /// Downloads of this model are checked against a signed manifest.
+    pub authenticity_enforced: bool,
+    pub provenance: ModelProvenance,
+    /// Why the last download was refused, if it was.
+    pub last_authenticity_error: Option<String>,
+}
+
+/// What the registry keeps of a model: shared handles on its state, so a
+/// status read never takes the model's data lock.
+#[derive(Clone)]
+struct RegisteredModel {
+    authenticity_enforced: bool,
+    provenance: Arc<AtomicU8>,
+    last_authenticity_error: Arc<CustomRwLock<Option<String>>>,
+}
+
+/// Every model [`CloudModel::initialize`]d in this process, by file name
+/// (the last one initialized under a name wins: one per published file in
+/// production).
+fn model_registry() -> &'static CustomDashMap<String, RegisteredModel> {
+    static REGISTRY: OnceLock<CustomDashMap<String, RegisteredModel>> = OnceLock::new();
+    REGISTRY.get_or_init(|| CustomDashMap::new("threatmodels_model_registry"))
+}
+
+/// The authenticity state of every model this process initialized, by file
+/// name: where its data came from and why its last download was refused. A
+/// model is listed once something touched it (the statics are lazy).
+pub async fn model_authenticity_states() -> Vec<ModelAuthenticityState> {
+    // Copy the handles out first: no registry reference is held across the
+    // awaits below.
+    let registered: Vec<(String, RegisteredModel)> = model_registry()
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+    let mut states = Vec::with_capacity(registered.len());
+    for (file_name, model) in registered {
+        states.push(ModelAuthenticityState {
+            scope: ManifestScope::for_path(&file_name),
+            authenticity_enforced: model.authenticity_enforced,
+            provenance: ModelProvenance::from_u8(model.provenance.load(Ordering::Acquire)),
+            last_authenticity_error: model.last_authenticity_error.read().await.clone(),
+            file_name,
+        });
+    }
+    states.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    states
 }
 
 /// A generic model for handling cloud-based data fetching and updating.
@@ -186,7 +252,7 @@ where
 
         let builtin_data = Arc::new(initial_data.clone());
 
-        Ok(Self {
+        let model = Self {
             data: Arc::new(CustomRwLock::new(initial_data)),
             file_name,
             is_custom: Arc::new(AtomicBool::new(false)),
@@ -196,7 +262,21 @@ where
             authenticator: ModelAuthenticator::production(),
             provenance: Arc::new(AtomicU8::new(ModelProvenance::Embedded.to_u8())),
             last_authenticity_error: Arc::new(CustomRwLock::new(None)),
-        })
+        };
+        model.register();
+        Ok(model)
+    }
+
+    /// List this model in [`model_authenticity_states`].
+    fn register(&self) {
+        model_registry().insert(
+            self.file_name.clone(),
+            RegisteredModel {
+                authenticity_enforced: self.authenticator.is_some(),
+                provenance: self.provenance.clone(),
+                last_authenticity_error: self.last_authenticity_error.clone(),
+            },
+        );
     }
 
     /// Replace the authenticator (tests, or a caller with its own key set).
@@ -204,6 +284,7 @@ where
     /// [`ModelProvenance::Downloaded`].
     pub fn with_authenticator(mut self, authenticator: Option<Arc<ModelAuthenticator>>) -> Self {
         self.authenticator = authenticator;
+        self.register();
         self
     }
 

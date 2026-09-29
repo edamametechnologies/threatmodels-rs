@@ -92,6 +92,12 @@ const _: () = assert!(
     "feature `model-signatures` requires PRODUCTION_ROOT_KEYS to hold the real root public keys"
 );
 
+/// Whether this build authenticates model downloads: the `model-signatures`
+/// feature, as Cargo unified it across the whole build (every crate of a
+/// build shares this crate's features). [`ModelAuthenticator::production`]
+/// is `Some` exactly when this is true.
+pub const SIGNATURES_ENFORCED: bool = cfg!(feature = "model-signatures");
+
 /// The manifest a published file belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ManifestScope {
