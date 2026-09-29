@@ -52,12 +52,16 @@ pub const CERT_DOMAIN: &[u8] = b"edamame-models-signing-cert-v1\n";
 
 /// Production root public keys (hex-encoded raw Ed25519, 32 bytes each).
 ///
-/// EMPTY until the offline root keys exist. Enabling the `model-signatures`
-/// feature with this list empty is a compile error (see below), so a build
-/// cannot claim verification without a key to verify against. Two slots are
-/// intended: the primary root and a backup root stored separately, which lets
+/// Enabling the `model-signatures` feature with this list empty is a compile
+/// error (see below), so a build cannot claim verification without a key to
+/// verify against. Two slots: the primary root and a backup root, which lets
 /// a compromised or lost root be retired by a release that drops it.
-pub const PRODUCTION_ROOT_KEYS: &[&str] = &[];
+pub const PRODUCTION_ROOT_KEYS: &[&str] = &[
+    // Root A (primary), key id 93295ebcb9a6ec08, created 2026-09-29.
+    "5b5d49de669207ebf90a8d4cb07a69c61f425515be8e69cef6aec83872fc59c4",
+    // Root B (backup), key id 39f35c44b16e9f62, created 2026-09-29.
+    "e1fcfd06a9baafc2f4c9cd5ba5d2b8721c1e7e4df5adbb027549f8ff740319cb",
+];
 
 /// Lowest manifest sequence accepted, per scope, before any download. Raise
 /// it with each release to the sequence of the manifest that matches the
