@@ -308,6 +308,101 @@ async fn refused_download_keeps_previously_verified_data() {
     assert_eq!(model.provenance(), ModelProvenance::DownloadedVerified);
 }
 
+/// The publisher lands a file on `main` before the signing run updates the
+/// manifest. While the manifest still names the version the client holds,
+/// the new file is refused as before (never loaded), but the refusal is a
+/// pending manifest, not an unverified file: the recorded reason says so.
+#[tokio::test]
+async fn new_file_under_the_held_versions_manifest_is_a_pending_manifest() {
+    let m = manifest("data", "main", 10, &[(DATA_FILE, REMOTE)]);
+    let s = envelope(vec![root_entry(&root_a(), &m)]);
+    let (base, files, _) = serve(layout(DATA_FILE, REMOTE, Some((m, s)))).await;
+    let model = model(DATA_FILE, &base, Some(authenticator(&[&root_a()])))
+        .with_refused_download_backoff(std::time::Duration::ZERO);
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::Updated
+    );
+
+    // A newer file, the manifest unchanged: it still names `REMOTE`, the
+    // version this model verified and holds.
+    let newer: &[u8] = br#"{"content":"newer","signature":"newer-sig"}"#;
+    {
+        let mut f = files.write().await;
+        f.insert("/main/test-data.json".into(), newer.to_vec());
+        f.insert("/main/test-data.sig".into(), sha256_hex(newer).into_bytes());
+    }
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(model.data.read().await.content, "remote");
+    assert_eq!(model.provenance(), ModelProvenance::DownloadedVerified);
+    let err = model.last_authenticity_error().await.unwrap();
+    assert!(err.starts_with("manifest pending:"), "{err}");
+    assert!(err.contains("does not match"), "{err}");
+
+    // The signing run catches up: the next update loads the file.
+    let m2 = manifest("data", "main", 11, &[(DATA_FILE, newer)]);
+    let s2 = envelope(vec![root_entry(&root_a(), &m2)]);
+    {
+        let mut f = files.write().await;
+        let scope = ManifestScope::for_path(DATA_FILE);
+        f.insert(format!("/main/{}", scope.manifest_path()), m2);
+        f.insert(format!("/main/{}", scope.signature_path()), s2);
+    }
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::Updated
+    );
+    assert_eq!(model.data.read().await.content, "newer");
+    assert_eq!(model.last_authenticity_error().await, None);
+}
+
+/// A mismatch the held version does not explain (the manifest names a
+/// version this client never had) stays an unverified download.
+#[tokio::test]
+async fn mismatch_against_an_unknown_version_is_not_a_pending_manifest() {
+    // The manifest names a version the client holds neither embedded nor
+    // downloaded; the served file is yet another one.
+    let listed: &[u8] = br#"{"content":"listed","signature":"listed-sig"}"#;
+    let served: &[u8] = br#"{"content":"served","signature":"served-sig"}"#;
+    let m = manifest("data", "main", 10, &[(DATA_FILE, listed)]);
+    let s = envelope(vec![root_entry(&root_a(), &m)]);
+    let (base, _, _) = serve(layout(DATA_FILE, served, Some((m, s)))).await;
+    let model = model(DATA_FILE, &base, Some(authenticator(&[&root_a()])));
+
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(model.data.read().await.content, "builtin");
+    assert_eq!(model.provenance(), ModelProvenance::Embedded);
+    let err = model.last_authenticity_error().await.unwrap();
+    assert!(!err.starts_with("manifest pending"), "{err}");
+    assert!(err.contains("does not match"), "{err}");
+}
+
+/// The embedded snapshot counts as a held version: a client that starts
+/// while the manifest still names the release's file reads the newer file
+/// as a pending manifest too.
+#[tokio::test]
+async fn embedded_snapshot_is_a_held_version_for_the_pending_reading() {
+    let newer: &[u8] = br#"{"content":"newer","signature":"newer-sig"}"#;
+    let m = manifest("data", "main", 10, &[(DATA_FILE, BUILTIN.as_bytes())]);
+    let s = envelope(vec![root_entry(&root_a(), &m)]);
+    let (base, _, _) = serve(layout(DATA_FILE, newer, Some((m, s)))).await;
+    let model = model(DATA_FILE, &base, Some(authenticator(&[&root_a()])));
+
+    assert_eq!(
+        model.update("main", false, parse).await.unwrap(),
+        UpdateStatus::NotUpdated
+    );
+    assert_eq!(model.data.read().await.content, "builtin");
+    let err = model.last_authenticity_error().await.unwrap();
+    assert!(err.starts_with("manifest pending:"), "{err}");
+}
+
 /// While the origin publishes a version that did not verify (same `.sig`),
 /// an update fetches only the `.sig`: the helper updates on every metric
 /// order whose signature differs from its copy. `force` and a new `.sig`

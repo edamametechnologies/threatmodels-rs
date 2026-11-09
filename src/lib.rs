@@ -12,7 +12,9 @@ pub mod authenticity;
 /// Shared HTTP client construction (workspace TLS trust policy / platform verifier).
 pub mod tls;
 
-pub use authenticity::{ManifestScope, ModelAuthenticator, TrustedKey, VerifiedManifest};
+pub use authenticity::{
+    FileHashMismatch, ManifestScope, ModelAuthenticator, TrustedKey, VerifiedManifest,
+};
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/edamametechnologies/threatmodels";
 static TIMEOUT: Duration = Duration::from_secs(120);
@@ -249,6 +251,11 @@ pub struct CloudModel<T: CloudSignature + Send + Sync + 'static> {
     /// The `.sig` of the last download refused for authenticity, and when.
     refused_download: Arc<CustomRwLock<Option<RefusedDownload>>>,
     refused_download_backoff: Duration,
+    /// SHA-256 of the data this model holds, when it is known: the embedded
+    /// snapshot's at start, the verified download's after an update. A
+    /// refused download whose manifest still names this version is a
+    /// manifest that has not caught up with its file (see `update`).
+    held_sha256: Arc<CustomRwLock<Option<String>>>,
 }
 
 /// A published version whose download did not verify.
@@ -285,6 +292,9 @@ where
             last_authenticity_error: Arc::new(CustomRwLock::new(None)),
             refused_download: Arc::new(CustomRwLock::new(None)),
             refused_download_backoff: REFUSED_DOWNLOAD_BACKOFF,
+            held_sha256: Arc::new(CustomRwLock::new(Some(authenticity::sha256_hex(
+                builtin.as_bytes(),
+            )))),
         };
         model.register();
         Ok(model)
@@ -364,6 +374,7 @@ where
             last_authenticity_error: Arc::new(CustomRwLock::new(None)),
             refused_download: Arc::new(CustomRwLock::new(None)),
             refused_download_backoff: REFUSED_DOWNLOAD_BACKOFF,
+            held_sha256: Arc::new(CustomRwLock::new(None)),
         }
     }
 
@@ -649,14 +660,41 @@ where
                     );
                     *self.last_authenticity_error.write().await = None;
                     *self.refused_download.write().await = None;
+                    *self.held_sha256.write().await =
+                        Some(authenticity::sha256_hex(json_text.as_bytes()));
                     ModelProvenance::DownloadedVerified
                 }
                 Err(err) => {
-                    warn!(
-                        "Refusing unverified download of '{}' from branch '{}', keeping current data: {:#}",
-                        self.file_name, branch, err
-                    );
-                    *self.last_authenticity_error.write().await = Some(format!("{err:#}"));
+                    // The file is refused either way: it is never parsed or
+                    // loaded. What differs is the reading. A manifest that
+                    // verified and still names the version this model holds
+                    // is a manifest the publisher has not updated yet (the
+                    // file lands first, the signing run follows): expected
+                    // for a while after every publication, and the backoff
+                    // below picks the file up once the manifest covers it.
+                    // Any other mismatch is a file the manifest does not
+                    // explain.
+                    let held = self.held_sha256.read().await.clone();
+                    let manifest_pending = err
+                        .downcast_ref::<FileHashMismatch>()
+                        .is_some_and(|mismatch| {
+                            held.as_deref()
+                                .is_some_and(|held| mismatch.manifest_names_version(held))
+                        });
+                    let reason = if manifest_pending {
+                        info!(
+                            "Not loading '{}' from branch '{}' yet: its manifest still names the version held, the signed manifest is pending ({:#})",
+                            self.file_name, branch, err
+                        );
+                        format!("manifest pending: {err:#}")
+                    } else {
+                        warn!(
+                            "Refusing unverified download of '{}' from branch '{}', keeping current data: {:#}",
+                            self.file_name, branch, err
+                        );
+                        format!("{err:#}")
+                    };
+                    *self.last_authenticity_error.write().await = Some(reason);
                     *self.refused_download.write().await = Some(RefusedDownload {
                         signature: new_signature.clone(),
                         at: std::time::Instant::now(),

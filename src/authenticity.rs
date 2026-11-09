@@ -241,7 +241,9 @@ pub struct VerifiedManifest {
 }
 
 impl VerifiedManifest {
-    /// Check `bytes` against the manifest entry for `path`.
+    /// Check `bytes` against the manifest entry for `path`. A hash mismatch
+    /// is a [`FileHashMismatch`] (reachable through `Error::downcast_ref`),
+    /// so a caller can tell which version the manifest names.
     pub fn check_file(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let expected = self.files.get(path).ok_or_else(|| {
             anyhow!(
@@ -251,15 +253,60 @@ impl VerifiedManifest {
         })?;
         let actual = sha256_hex(bytes);
         if !expected.eq_ignore_ascii_case(&actual) {
-            bail!(
-                "{path} does not match the {} manifest (sequence {}): expected sha256 {expected}, got {actual}",
-                self.scope.as_str(),
-                self.sequence
-            );
+            return Err(FileHashMismatch {
+                path: path.to_string(),
+                scope: self.scope,
+                sequence: self.sequence,
+                expected: expected.to_ascii_lowercase(),
+                actual,
+            }
+            .into());
         }
         Ok(())
     }
 }
+
+/// A published file whose SHA-256 is not the one its (verified) manifest
+/// lists. The manifest may simply be older than the file: the publisher
+/// lands a file before the signing run updates the manifest, and until it
+/// does the manifest still names the previous version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHashMismatch {
+    pub path: String,
+    pub scope: ManifestScope,
+    /// The manifest's sequence.
+    pub sequence: u64,
+    /// The SHA-256 the manifest lists for `path`, lower-case hex.
+    pub expected: String,
+    /// The SHA-256 of the bytes that were checked, lower-case hex.
+    pub actual: String,
+}
+
+impl FileHashMismatch {
+    /// True when the manifest names the version whose SHA-256 is `sha256`:
+    /// with the version a client already holds, the file moved on and the
+    /// manifest has not caught up yet (pending), rather than the manifest
+    /// naming a version the client has never seen.
+    pub fn manifest_names_version(&self, sha256: &str) -> bool {
+        self.expected.eq_ignore_ascii_case(sha256.trim())
+    }
+}
+
+impl std::fmt::Display for FileHashMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} does not match the {} manifest (sequence {}): expected sha256 {}, got {}",
+            self.path,
+            self.scope.as_str(),
+            self.sequence,
+            self.expected,
+            self.actual
+        )
+    }
+}
+
+impl std::error::Error for FileHashMismatch {}
 
 /// Verifies manifests against a set of trusted root keys and tracks the
 /// highest accepted sequence per scope (rollback protection).
