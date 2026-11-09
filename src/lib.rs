@@ -675,12 +675,12 @@ where
                     // Any other mismatch is a file the manifest does not
                     // explain.
                     let held = self.held_sha256.read().await.clone();
-                    let manifest_pending = err
-                        .downcast_ref::<FileHashMismatch>()
-                        .is_some_and(|mismatch| {
-                            held.as_deref()
-                                .is_some_and(|held| mismatch.manifest_names_version(held))
-                        });
+                    let manifest_pending =
+                        err.downcast_ref::<FileHashMismatch>()
+                            .is_some_and(|mismatch| {
+                                held.as_deref()
+                                    .is_some_and(|held| mismatch.manifest_names_version(held))
+                            });
                     let reason = if manifest_pending {
                         info!(
                             "Not loading '{}' from branch '{}' yet: its manifest still names the version held, the signed manifest is pending ({:#})",
