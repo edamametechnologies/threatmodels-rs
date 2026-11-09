@@ -262,8 +262,9 @@ impl<T> CloudModel<T>
 where
     T: CloudSignature + Send + Sync + Clone + 'static,
 {
-    /// Initializes the CloudModel with built-in data.
-    pub fn initialize<F>(file_name: String, builtin: &'static str, parser: F) -> Result<Self>
+    /// Initializes the CloudModel with built-in data. Only the parsed value
+    /// is kept: `builtin` may be a decoded buffer the caller drops afterwards.
+    pub fn initialize<F>(file_name: String, builtin: &str, parser: F) -> Result<Self>
     where
         F: Fn(&str) -> Result<T>,
     {
